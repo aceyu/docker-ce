@@ -1,8 +1,8 @@
 ARCH=$(shell uname -m)
-ENGINE_DIR:=$(CURDIR)/../../engine
+ENGINE_DIR:=$(CURDIR)/../../../../docker
 CLI_DIR:=$(CURDIR)/../../cli
 GITCOMMIT=$(shell cd $(ENGINE_DIR) && git rev-parse --short HEAD)
-VERSION?=0.0.0-dev
+VERSION=18.06.1
 GO_VERSION:=1.10.3
 GEN_RPM_VER=$(shell ./gen-rpm-ver $(ENGINE_DIR) $(VERSION))
 CHOWN=docker run --rm -i -v $(CURDIR):/v -w /v alpine chown
