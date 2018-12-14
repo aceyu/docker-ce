@@ -21,9 +21,8 @@ RUN yum install -y \
 ARG GO_VERSION
 ENV DISTRO centos
 ENV SUITE 7
-RUN export https_proxy=http://192.168.65.2:8118 
-RUN curl -fSL "https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar xzC /usr/local
-RUN unset https_proxy
+RUN export https_proxy=http://192.168.65.2:8118 && \
+   curl -fSL "https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar xzC /usr/local
 #ADD go1.10.3.linux-amd64.tar.gz /usr/local/
 RUN mkdir -p /go
 ENV GOPATH=/go
