@@ -1,5 +1,4 @@
 FROM centos:7
-#FROM rpmbuild-centos:7
 RUN yum groupinstall -y "Development Tools"
 RUN yum -y swap -- remove systemd-container systemd-container-libs -- install systemd systemd-libs
 RUN yum install -y \
