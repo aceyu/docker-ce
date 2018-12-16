@@ -43,15 +43,15 @@ if [ -n "$($GIT_COMMAND status --porcelain --untracked-files=no)" ]; then
 fi
 
 # if we have a "-dev" suffix or have change in Git, let's make this package version more complex so it works better
-if [[ "$rpmVersion" == *-dev ]] || [ -n "$($GIT_COMMAND status --porcelain)" ]; then
-    gitUnix="$($GIT_COMMAND log -1 --pretty='%at')"
-    gitDate="$($DATE_COMMAND --date "@$gitUnix" +'%Y%m%d.%H%M%S')"
-    gitCommit="$($GIT_COMMAND log -1 --pretty='%h')"
-    gitVersion="git${gitDate}.0.${gitCommit}"
-    # gitVersion is now something like '20150128.112847.17e840a'
-    rpmVersion="${rpmVersion%-dev}"
-    rpmRelease="0.0.dev.$gitVersion"
-fi
+# if [[ "$rpmVersion" == *-dev ]] || [ -n "$($GIT_COMMAND status --porcelain)" ]; then
+#     gitUnix="$($GIT_COMMAND log -1 --pretty='%at')"
+#     gitDate="$($DATE_COMMAND --date "@$gitUnix" +'%Y%m%d.%H%M%S')"
+#     gitCommit="$($GIT_COMMAND log -1 --pretty='%h')"
+#     gitVersion="git${gitDate}.0.${gitCommit}"
+#     # gitVersion is now something like '20150128.112847.17e840a'
+#     rpmVersion="${rpmVersion%-dev}"
+#     rpmRelease="0.0.dev.$gitVersion"
+# fi
 
 # Replace any other dashes with periods
 rpmVersion="${rpmVersion//-/.}"
