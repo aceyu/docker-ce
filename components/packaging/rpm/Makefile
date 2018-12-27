@@ -1,7 +1,8 @@
 ARCH=$(shell uname -m)
 ENGINE_DIR:=$(CURDIR)/../../../../docker
+CLI_DIR:=$(CURDIR)/../../../../cli
 #ENGINE_DIR:=$(CURDIR)/../../engine
-CLI_DIR:=$(CURDIR)/../../cli
+#CLI_DIR:=$(CURDIR)/../../cli
 GITCOMMIT=$(shell cd $(ENGINE_DIR) && git rev-parse --short HEAD)
 VERSION=18.06.1
 GO_VERSION:=1.10.3
