@@ -9,7 +9,9 @@ Type=notify
 # the default is not to use systemd for cgroups because the delegate issues still
 # exists and systemd currently does not support the cgroup feature set required
 # for containers run by docker
-ExecStart=/usr/bin/dockerd --default-insecure-registry=registry.docker.i.fbank.com
+# --default-registry replace the default docker.io registry with SSL
+# --default-insecure-registry replace the default docker.io registry without SSL
+ExecStart=/usr/bin/dockerd --default-registry=docker.io.i.fbank.com
 ExecReload=/bin/kill -s HUP $MAINPID
 # Having non-zero Limit*s causes performance problems due to accounting overhead
 # in the kernel. We recommend using cgroups to do container-local accounting.
