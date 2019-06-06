@@ -11,7 +11,7 @@ Type=notify
 # for containers run by docker
 # --default-registry replace the default docker.io registry with SSL
 # --default-insecure-registry replace the default docker.io registry without SSL
-ExecStart=/usr/bin/dockerd --default-registry=docker.io.i.fbank.com
+ExecStart=/usr/bin/dockerd
 ExecReload=/bin/kill -s HUP $MAINPID
 # Having non-zero Limit*s causes performance problems due to accounting overhead
 # in the kernel. We recommend using cgroups to do container-local accounting.
