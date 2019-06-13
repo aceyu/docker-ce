@@ -13,6 +13,7 @@ import (
 	cliconfig "github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/debug"
 	cliflags "github.com/docker/cli/cli/flags"
+	"github.com/docker/cli/internal/containerizedengine"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/term"
@@ -32,6 +33,9 @@ func newDockerCommand(dockerCli *command.DockerCli) *cobra.Command {
 		SilenceErrors:    true,
 		TraverseChildren: true,
 		Args:             noArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return command.ShowHelp(dockerCli.Err())(cmd, args)
+		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// flags must be the top-level command flags, not cmd.Flags()
 			opts.Common.SetDefaultOptions(flags)
@@ -99,8 +103,10 @@ func setHelpFunc(dockerCli *command.DockerCli, cmd *cobra.Command, flags *pflag.
 			ccmd.Println(err)
 			return
 		}
-
-		hideUnsupportedFeatures(ccmd, dockerCli)
+		if err := hideUnsupportedFeatures(ccmd, dockerCli); err != nil {
+			ccmd.Println(err)
+			return
+		}
 		defaultHelpFunc(ccmd, args)
 	})
 }
@@ -168,7 +174,7 @@ func main() {
 	stdin, stdout, stderr := term.StdStreams()
 	logrus.SetOutput(stderr)
 
-	dockerCli := command.NewDockerCli(stdin, stdout, stderr, contentTrustEnabled())
+	dockerCli := command.NewDockerCli(stdin, stdout, stderr, contentTrustEnabled(), containerizedengine.NewClient)
 	cmd := newDockerCommand(dockerCli)
 
 	if err := cmd.Execute(); err != nil {
@@ -234,15 +240,21 @@ func hideFeatureSubCommand(subcmd *cobra.Command, hasFeature bool, annotation st
 	}
 }
 
-func hideUnsupportedFeatures(cmd *cobra.Command, details versionDetails) {
+func hideUnsupportedFeatures(cmd *cobra.Command, details versionDetails) error {
 	clientVersion := details.Client().ClientVersion()
 	osType := details.ServerInfo().OSType
 	hasExperimental := details.ServerInfo().HasExperimental
 	hasExperimentalCLI := details.ClientInfo().HasExperimental
+	hasBuildKit, err := command.BuildKitEnabled(details.ServerInfo())
+	if err != nil {
+		return err
+	}
 
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		hideFeatureFlag(f, hasExperimental, "experimental")
 		hideFeatureFlag(f, hasExperimentalCLI, "experimentalCLI")
+		hideFeatureFlag(f, hasBuildKit, "buildkit")
+		hideFeatureFlag(f, !hasBuildKit, "no-buildkit")
 		// hide flags not supported by the server
 		if !isOSTypeSupported(f, osType) || !isVersionSupported(f, clientVersion) {
 			f.Hidden = true
@@ -258,6 +270,8 @@ func hideUnsupportedFeatures(cmd *cobra.Command, details versionDetails) {
 	for _, subcmd := range cmd.Commands() {
 		hideFeatureSubCommand(subcmd, hasExperimental, "experimental")
 		hideFeatureSubCommand(subcmd, hasExperimentalCLI, "experimentalCLI")
+		hideFeatureSubCommand(subcmd, hasBuildKit, "buildkit")
+		hideFeatureSubCommand(subcmd, !hasBuildKit, "no-buildkit")
 		// hide subcommands not supported by the server
 		if subcmdVersion, ok := subcmd.Annotations["version"]; ok && versions.LessThan(clientVersion, subcmdVersion) {
 			subcmd.Hidden = true
@@ -266,6 +280,7 @@ func hideUnsupportedFeatures(cmd *cobra.Command, details versionDetails) {
 			subcmd.Hidden = true
 		}
 	}
+	return nil
 }
 
 // Checks if a command or one of its ancestors is in the list
@@ -312,6 +327,7 @@ func areFlagsSupported(cmd *cobra.Command, details versionDetails) error {
 			if _, ok := f.Annotations["experimentalCLI"]; ok && !hasExperimentalCLI {
 				errs = append(errs, fmt.Sprintf("\"--%s\" is on a Docker cli with experimental cli features enabled", f.Name))
 			}
+			// buildkit-specific flags are noop when buildkit is not enabled, so we do not add an error in that case
 		}
 	})
 	if len(errs) > 0 {

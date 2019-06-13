@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/docker/cli/cli"
@@ -58,7 +57,7 @@ type buildOptions struct {
 	isolation      string
 	quiet          bool
 	noCache        bool
-	console        opts.NullableBool
+	progress       string
 	rm             bool
 	forceRm        bool
 	pull           bool
@@ -72,6 +71,8 @@ type buildOptions struct {
 	stream         bool
 	platform       string
 	untrusted      bool
+	secrets        []string
+	ssh            []string
 }
 
 // dockerfileFromStdin returns true when the user specified that the Dockerfile
@@ -135,6 +136,8 @@ func NewBuildCommand(dockerCli command.Cli) *cobra.Command {
 	flags.BoolVar(&options.pull, "pull", false, "Always attempt to pull a newer version of the image")
 	flags.StringSliceVar(&options.cacheFrom, "cache-from", []string{}, "Images to consider as cache sources")
 	flags.BoolVar(&options.compress, "compress", false, "Compress the build context using gzip")
+	flags.SetAnnotation("compress", "no-buildkit", nil)
+
 	flags.StringSliceVar(&options.securityOpt, "security-opt", []string{}, "Security options")
 	flags.StringVar(&options.networkMode, "network", "default", "Set the networking mode for the RUN instructions during build")
 	flags.SetAnnotation("network", "version", []string{"1.25"})
@@ -152,10 +155,18 @@ func NewBuildCommand(dockerCli command.Cli) *cobra.Command {
 	flags.BoolVar(&options.stream, "stream", false, "Stream attaches to server to negotiate build context")
 	flags.SetAnnotation("stream", "experimental", nil)
 	flags.SetAnnotation("stream", "version", []string{"1.31"})
+	flags.SetAnnotation("stream", "no-buildkit", nil)
 
-	flags.Var(&options.console, "console", "Show console output (with buildkit only) (true, false, auto)")
-	flags.SetAnnotation("console", "experimental", nil)
-	flags.SetAnnotation("console", "version", []string{"1.38"})
+	flags.StringVar(&options.progress, "progress", "auto", "Set type of progress output (auto, plain, tty). Use plain to show container output")
+	flags.SetAnnotation("progress", "buildkit", nil)
+
+	flags.StringArrayVar(&options.secrets, "secret", []string{}, "Secret file to expose to the build (only if BuildKit enabled): id=mysecret,src=/local/secret")
+	flags.SetAnnotation("secret", "version", []string{"1.39"})
+	flags.SetAnnotation("secret", "buildkit", nil)
+
+	flags.StringArrayVar(&options.ssh, "ssh", []string{}, "SSH agent socket or keys to expose to the build (only if BuildKit enabled) (format: default|<id>[=<socket>|<key>[,<key>]])")
+	flags.SetAnnotation("ssh", "version", []string{"1.39"})
+	flags.SetAnnotation("ssh", "buildkit", nil)
 	return cmd
 }
 
@@ -177,20 +188,17 @@ func (out *lastProgressOutput) WriteProgress(prog progress.Progress) error {
 
 // nolint: gocyclo
 func runBuild(dockerCli command.Cli, options buildOptions) error {
-	if buildkitEnv := os.Getenv("DOCKER_BUILDKIT"); buildkitEnv != "" {
-		enableBuildkit, err := strconv.ParseBool(buildkitEnv)
-		if err != nil {
-			return errors.Wrap(err, "DOCKER_BUILDKIT environment variable expects boolean value")
-		}
-		if enableBuildkit {
-			return runBuildBuildKit(dockerCli, options)
-		}
+	buildkitEnabled, err := command.BuildKitEnabled(dockerCli.ServerInfo())
+	if err != nil {
+		return err
+	}
+	if buildkitEnabled {
+		return runBuildBuildKit(dockerCli, options)
 	}
 
 	var (
 		buildCtx      io.ReadCloser
 		dockerfileCtx io.ReadCloser
-		err           error
 		contextDir    string
 		tempDir       string
 		relDockerfile string
@@ -270,15 +278,12 @@ func runBuild(dockerCli command.Cli, options buildOptions) error {
 		}
 
 		// And canonicalize dockerfile name to a platform-independent one
-		relDockerfile, err = archive.CanonicalTarNameForPath(relDockerfile)
-		if err != nil {
-			return errors.Errorf("cannot canonicalize dockerfile path %s: %v", relDockerfile, err)
-		}
+		relDockerfile = archive.CanonicalTarNameForPath(relDockerfile)
 
 		excludes = build.TrimBuildFilesFromExcludes(excludes, relDockerfile, options.dockerfileFromStdin())
 		buildCtx, err = archive.TarWithOptions(contextDir, &archive.TarOptions{
 			ExcludePatterns: excludes,
-			ChownOpts:       &idtools.IDPair{UID: 0, GID: 0},
+			ChownOpts:       &idtools.Identity{UID: 0, GID: 0},
 		})
 		if err != nil {
 			return err
@@ -345,7 +350,7 @@ func runBuild(dockerCli command.Cli, options buildOptions) error {
 		buildCtx = dockerfileCtx
 	}
 
-	s, err := trySession(dockerCli, contextDir)
+	s, err := trySession(dockerCli, contextDir, true)
 	if err != nil {
 		return err
 	}

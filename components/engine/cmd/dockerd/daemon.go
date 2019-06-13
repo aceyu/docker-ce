@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	containerddefaults "github.com/containerd/containerd/defaults"
 	"github.com/docker/distribution/uuid"
 	"github.com/docker/docker/api"
 	apiserver "github.com/docker/docker/api/server"
@@ -36,7 +37,7 @@ import (
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/listeners"
 	"github.com/docker/docker/dockerversion"
-	"github.com/docker/docker/libcontainerd"
+	"github.com/docker/docker/libcontainerd/supervisor"
 	dopts "github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/authorization"
 	"github.com/docker/docker/pkg/jsonmessage"
@@ -45,7 +46,6 @@ import (
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/plugin"
-	"github.com/docker/docker/registry"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/go-connections/tlsconfig"
 	swarmapi "github.com/docker/swarmkit/api"
@@ -112,6 +112,10 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return err
 	}
 
+	if err := system.MkdirAll(cli.Config.ExecRoot, 0700, ""); err != nil {
+		return err
+	}
+
 	if cli.Pidfile != "" {
 		pf, err := pidfile.New(cli.Pidfile)
 		if err != nil {
@@ -135,19 +139,30 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return fmt.Errorf("Failed to load listeners: %v", err)
 	}
 
-	registryService, err := registry.NewService(cli.Config.ServiceOptions)
-	if err != nil {
-		return err
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if cli.Config.ContainerdAddr == "" && runtime.GOOS != "windows" {
+		if !systemContainerdRunning() {
+			opts, err := cli.getContainerdDaemonOpts()
+			if err != nil {
+				cancel()
+				return fmt.Errorf("Failed to generate containerd options: %v", err)
+			}
 
-	rOpts, err := cli.getRemoteOptions()
-	if err != nil {
-		return fmt.Errorf("Failed to generate containerd options: %v", err)
+			r, err := supervisor.Start(ctx, filepath.Join(cli.Config.Root, "containerd"), filepath.Join(cli.Config.ExecRoot, "containerd"), opts...)
+			if err != nil {
+				cancel()
+				return fmt.Errorf("Failed to start containerd: %v", err)
+			}
+			cli.Config.ContainerdAddr = r.Address()
+
+			// Try to wait for containerd to shutdown
+			defer r.WaitTimeout(10 * time.Second)
+		} else {
+			cli.Config.ContainerdAddr = containerddefaults.DefaultAddress
+		}
 	}
-	containerdRemote, err := libcontainerd.New(filepath.Join(cli.Config.Root, "containerd"), filepath.Join(cli.Config.ExecRoot, "containerd"), rOpts...)
-	if err != nil {
-		return err
-	}
+	defer cancel()
+
 	signal.Trap(func() {
 		cli.stop()
 		<-stopc // wait for daemonCli.start() to return
@@ -162,14 +177,14 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		logrus.Fatalf("Error creating middlewares: %v", err)
 	}
 
-	d, err := daemon.NewDaemon(cli.Config, registryService, containerdRemote, pluginStore)
+	d, err := daemon.NewDaemon(ctx, cli.Config, pluginStore)
 	if err != nil {
 		return fmt.Errorf("Error starting daemon: %v", err)
 	}
 
 	d.StoreHosts(hosts)
 
-	// validate after NewDaemon has restored enabled plugins. Dont change order.
+	// validate after NewDaemon has restored enabled plugins. Don't change order.
 	if err := validateAuthzPlugins(cli.Config.AuthorizationPlugins, pluginStore); err != nil {
 		return fmt.Errorf("Error validating authorization plugin: %v", err)
 	}
@@ -207,10 +222,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 
 	initRouter(routerOptions)
 
-	// process cluster change notifications
-	watchCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go d.ProcessClusterNotifications(watchCtx, c.GetWatchStream())
+	go d.ProcessClusterNotifications(ctx, c.GetWatchStream())
 
 	cli.setupConfigReloadTrap()
 
@@ -227,8 +239,12 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	// Wait for serve API to complete
 	errAPI := <-serveAPIWait
 	c.Cleanup()
+
 	shutdownDaemon(d)
-	containerdRemote.Cleanup()
+
+	// Stop notification processing and any background processes
+	cancel()
+
 	if errAPI != nil {
 		return fmt.Errorf("Shutting down due to ServeAPI error: %v", errAPI)
 	}
@@ -240,13 +256,14 @@ type routerOptions struct {
 	sessionManager *session.Manager
 	buildBackend   *buildbackend.Backend
 	buildCache     *fscache.FSCache // legacy
+	features       *map[string]bool
 	buildkit       *buildkit.Builder
 	daemon         *daemon.Daemon
 	api            *apiserver.Server
 	cluster        *cluster.Cluster
 }
 
-func newRouterOptions(config *config.Config, daemon *daemon.Daemon) (routerOptions, error) {
+func newRouterOptions(config *config.Config, d *daemon.Daemon) (routerOptions, error) {
 	opts := routerOptions{}
 	sm, err := session.NewManager()
 	if err != nil {
@@ -267,31 +284,35 @@ func newRouterOptions(config *config.Config, daemon *daemon.Daemon) (routerOptio
 		return opts, errors.Wrap(err, "failed to create fscache")
 	}
 
-	manager, err := dockerfile.NewBuildManager(daemon.BuilderBackend(), sm, buildCache, daemon.IDMappings())
+	manager, err := dockerfile.NewBuildManager(d.BuilderBackend(), sm, buildCache, d.IdentityMapping())
 	if err != nil {
 		return opts, err
 	}
-
-	buildkit, err := buildkit.New(buildkit.Opt{
-		SessionManager: sm,
-		Root:           filepath.Join(config.Root, "buildkit"),
-		Dist:           daemon.DistributionServices(),
+	cgroupParent := newCgroupParent(config)
+	bk, err := buildkit.New(buildkit.Opt{
+		SessionManager:      sm,
+		Root:                filepath.Join(config.Root, "buildkit"),
+		Dist:                d.DistributionServices(),
+		NetworkController:   d.NetworkController(),
+		DefaultCgroupParent: cgroupParent,
+		ResolverOpt:         d.NewResolveOptionsFunc(),
+		BuilderConfig:       config.Builder,
 	})
 	if err != nil {
 		return opts, err
 	}
 
-	bb, err := buildbackend.NewBackend(daemon.ImageService(), manager, buildCache, buildkit)
+	bb, err := buildbackend.NewBackend(d.ImageService(), manager, buildCache, bk)
 	if err != nil {
 		return opts, errors.Wrap(err, "failed to create buildmanager")
 	}
-
 	return routerOptions{
 		sessionManager: sm,
 		buildBackend:   bb,
 		buildCache:     buildCache,
-		buildkit:       buildkit,
-		daemon:         daemon,
+		buildkit:       bk,
+		features:       d.Features(),
+		daemon:         d,
 	}, nil
 }
 
@@ -464,9 +485,9 @@ func initRouter(opts routerOptions) {
 		checkpointrouter.NewRouter(opts.daemon, decoder),
 		container.NewRouter(opts.daemon, decoder),
 		image.NewRouter(opts.daemon.ImageService()),
-		systemrouter.NewRouter(opts.daemon, opts.cluster, opts.buildCache, opts.buildkit),
+		systemrouter.NewRouter(opts.daemon, opts.cluster, opts.buildCache, opts.buildkit, opts.features),
 		volume.NewRouter(opts.daemon.VolumesService()),
-		build.NewRouter(opts.buildBackend, opts.daemon),
+		build.NewRouter(opts.buildBackend, opts.daemon, opts.features),
 		sessionrouter.NewRouter(opts.sessionManager),
 		swarmrouter.NewRouter(opts.cluster),
 		pluginrouter.NewRouter(opts.daemon.PluginManager()),
@@ -511,14 +532,22 @@ func (cli *DaemonCli) initMiddlewares(s *apiserver.Server, cfg *apiserver.Config
 	return nil
 }
 
-func (cli *DaemonCli) getRemoteOptions() ([]libcontainerd.RemoteOption, error) {
-	opts := []libcontainerd.RemoteOption{}
-
-	pOpts, err := cli.getPlatformRemoteOptions()
+func (cli *DaemonCli) getContainerdDaemonOpts() ([]supervisor.DaemonOpt, error) {
+	opts, err := cli.getPlatformContainerdDaemonOpts()
 	if err != nil {
 		return nil, err
 	}
-	opts = append(opts, pOpts...)
+
+	if cli.Config.Debug {
+		opts = append(opts, supervisor.WithLogLevel("debug"))
+	} else if cli.Config.LogLevel != "" {
+		opts = append(opts, supervisor.WithLogLevel(cli.Config.LogLevel))
+	}
+
+	if !cli.Config.CriContainerd {
+		opts = append(opts, supervisor.WithPlugin("cri", nil))
+	}
+
 	return opts, nil
 }
 
@@ -635,4 +664,9 @@ func validateAuthzPlugins(requestedPlugins []string, pg plugingetter.PluginGette
 		}
 	}
 	return nil
+}
+
+func systemContainerdRunning() bool {
+	_, err := os.Lstat(containerddefaults.DefaultAddress)
+	return err == nil
 }

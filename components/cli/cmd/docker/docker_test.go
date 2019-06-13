@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -26,8 +27,25 @@ func TestClientDebugEnabled(t *testing.T) {
 
 func TestExitStatusForInvalidSubcommandWithHelpFlag(t *testing.T) {
 	discard := ioutil.Discard
-	cmd := newDockerCommand(command.NewDockerCli(os.Stdin, discard, discard, false))
+	cmd := newDockerCommand(command.NewDockerCli(os.Stdin, discard, discard, false, nil))
 	cmd.SetArgs([]string{"help", "invalid"})
 	err := cmd.Execute()
 	assert.Error(t, err, "unknown help topic: invalid")
+}
+
+func TestExitStatusForInvalidSubcommand(t *testing.T) {
+	discard := ioutil.Discard
+	cmd := newDockerCommand(command.NewDockerCli(os.Stdin, discard, discard, false, nil))
+	cmd.SetArgs([]string{"invalid"})
+	err := cmd.Execute()
+	assert.Check(t, is.ErrorContains(err, "docker: 'invalid' is not a docker command."))
+}
+
+func TestVersion(t *testing.T) {
+	var b bytes.Buffer
+	cmd := newDockerCommand(command.NewDockerCli(os.Stdin, &b, &b, false, nil))
+	cmd.SetArgs([]string{"--version"})
+	err := cmd.Execute()
+	assert.NilError(t, err)
+	assert.Check(t, is.Contains(b.String(), "Docker version"))
 }

@@ -3,6 +3,7 @@ package image
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,18 +16,22 @@ import (
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/image/build"
+	"github.com/docker/cli/opts"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/urlutil"
 	controlapi "github.com/moby/buildkit/api/services/control"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/session/filesync"
+	"github.com/moby/buildkit/session/secrets/secretsprovider"
+	"github.com/moby/buildkit/session/sshforward/sshprovider"
 	"github.com/moby/buildkit/util/appcontext"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"github.com/pkg/errors"
-	"github.com/tonistiigi/fsutil"
+	fsutiltypes "github.com/tonistiigi/fsutil/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -38,7 +43,7 @@ var errDockerfileConflict = errors.New("ambiguous Dockerfile source: both stdin 
 func runBuildBuildKit(dockerCli command.Cli, options buildOptions) error {
 	ctx := appcontext.Context()
 
-	s, err := trySession(dockerCli, options.context)
+	s, err := trySession(dockerCli, options.context, false)
 	if err != nil {
 		return err
 	}
@@ -127,6 +132,20 @@ func runBuildBuildKit(dockerCli command.Cli, options buildOptions) error {
 	}
 
 	s.Allow(authprovider.NewDockerAuthProvider())
+	if len(options.secrets) > 0 {
+		sp, err := parseSecretSpecs(options.secrets)
+		if err != nil {
+			return errors.Wrapf(err, "could not parse secrets: %v", options.secrets)
+		}
+		s.Allow(sp)
+	}
+	if len(options.ssh) > 0 {
+		sshp, err := parseSSHSpecs(options.ssh)
+		if err != nil {
+			return errors.Wrapf(err, "could not parse ssh: %v", options.ssh)
+		}
+		s.Allow(sshp)
+	}
 
 	eg, ctx := errgroup.WithContext(ctx)
 
@@ -191,16 +210,19 @@ func doBuild(ctx context.Context, eg *errgroup.Group, dockerCli command.Cli, opt
 	t := newTracer()
 	ssArr := []*client.SolveStatus{}
 
+	if err := opts.ValidateProgressOutput(options.progress); err != nil {
+		return err
+	}
+
 	displayStatus := func(out *os.File, displayCh chan *client.SolveStatus) {
 		var c console.Console
-		// TODO: Handle interactive output in non-interactive environment.
-		consoleOpt := options.console.Value()
-		if cons, err := console.ConsoleFromFile(out); err == nil && (consoleOpt == nil || *consoleOpt) {
+		// TODO: Handle tty output in non-tty environment.
+		if cons, err := console.ConsoleFromFile(out); err == nil && (options.progress == "auto" || options.progress == "tty") {
 			c = cons
 		}
 		// not using shared context to not disrupt display but let is finish reporting errors
 		eg.Go(func() error {
-			return progressui.DisplaySolveStatus(context.TODO(), c, out, displayCh)
+			return progressui.DisplaySolveStatus(context.TODO(), "", c, out, displayCh)
 		})
 	}
 
@@ -277,7 +299,7 @@ func doBuild(ctx context.Context, eg *errgroup.Group, dockerCli command.Cli, opt
 	return err
 }
 
-func resetUIDAndGID(s *fsutil.Stat) bool {
+func resetUIDAndGID(s *fsutiltypes.Stat) bool {
 	s.Uid = 0
 	s.Gid = 0
 	return true
@@ -343,4 +365,77 @@ func (t *tracer) write(msg jsonmessage.JSONMessage) {
 	}
 
 	t.displayCh <- &s
+}
+
+func parseSecretSpecs(sl []string) (session.Attachable, error) {
+	fs := make([]secretsprovider.FileSource, 0, len(sl))
+	for _, v := range sl {
+		s, err := parseSecret(v)
+		if err != nil {
+			return nil, err
+		}
+		fs = append(fs, *s)
+	}
+	store, err := secretsprovider.NewFileStore(fs)
+	if err != nil {
+		return nil, err
+	}
+	return secretsprovider.NewSecretProvider(store), nil
+}
+
+func parseSecret(value string) (*secretsprovider.FileSource, error) {
+	csvReader := csv.NewReader(strings.NewReader(value))
+	fields, err := csvReader.Read()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse csv secret")
+	}
+
+	fs := secretsprovider.FileSource{}
+
+	for _, field := range fields {
+		parts := strings.SplitN(field, "=", 2)
+		key := strings.ToLower(parts[0])
+
+		if len(parts) != 2 {
+			return nil, errors.Errorf("invalid field '%s' must be a key=value pair", field)
+		}
+
+		value := parts[1]
+		switch key {
+		case "type":
+			if value != "file" {
+				return nil, errors.Errorf("unsupported secret type %q", value)
+			}
+		case "id":
+			fs.ID = value
+		case "source", "src":
+			fs.FilePath = value
+		default:
+			return nil, errors.Errorf("unexpected key '%s' in '%s'", key, field)
+		}
+	}
+	return &fs, nil
+}
+
+func parseSSHSpecs(sl []string) (session.Attachable, error) {
+	configs := make([]sshprovider.AgentConfig, 0, len(sl))
+	for _, v := range sl {
+		c, err := parseSSH(v)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, *c)
+	}
+	return sshprovider.NewSSHAgentProvider(configs)
+}
+
+func parseSSH(value string) (*sshprovider.AgentConfig, error) {
+	parts := strings.SplitN(value, "=", 2)
+	cfg := sshprovider.AgentConfig{
+		ID: parts[0],
+	}
+	if len(parts) > 1 {
+		cfg.Paths = strings.Split(parts[1], ",")
+	}
+	return &cfg, nil
 }

@@ -1,2 +1,4 @@
 .helpers/
-.DS_Store
+Dockerfile.engine
+image-linux
+*.tar

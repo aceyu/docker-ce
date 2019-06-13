@@ -78,6 +78,12 @@ func TestEmptyValueWithSoftDefault(t *testing.T) {
 	assert.Check(t, is.Equal("ok def", result))
 }
 
+func TestValueWithSoftDefault(t *testing.T) {
+	result, err := Substitute("ok ${FOO:-def}", defaultMapping)
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("ok first", result))
+}
+
 func TestEmptyValueWithHardDefault(t *testing.T) {
 	result, err := Substitute("ok ${BAR-def}", defaultMapping)
 	assert.NilError(t, err)
@@ -161,14 +167,117 @@ func TestSubstituteWithCustomFunc(t *testing.T) {
 		return value, true, nil
 	}
 
-	result, err := SubstituteWith("ok ${FOO}", defaultMapping, pattern, errIsMissing)
+	result, err := SubstituteWith("ok ${FOO}", defaultMapping, defaultPattern, errIsMissing)
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal("ok first", result))
 
-	result, err = SubstituteWith("ok ${BAR}", defaultMapping, pattern, errIsMissing)
+	result, err = SubstituteWith("ok ${BAR}", defaultMapping, defaultPattern, errIsMissing)
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal("ok ", result))
 
-	_, err = SubstituteWith("ok ${NOTHERE}", defaultMapping, pattern, errIsMissing)
+	_, err = SubstituteWith("ok ${NOTHERE}", defaultMapping, defaultPattern, errIsMissing)
 	assert.Check(t, is.ErrorContains(err, "required variable"))
+}
+
+func TestExtractVariables(t *testing.T) {
+	testCases := []struct {
+		name     string
+		dict     map[string]interface{}
+		expected map[string]string
+	}{
+		{
+			name:     "empty",
+			dict:     map[string]interface{}{},
+			expected: map[string]string{},
+		},
+		{
+			name: "no-variables",
+			dict: map[string]interface{}{
+				"foo": "bar",
+			},
+			expected: map[string]string{},
+		},
+		{
+			name: "variable-without-curly-braces",
+			dict: map[string]interface{}{
+				"foo": "$bar",
+			},
+			expected: map[string]string{
+				"bar": "",
+			},
+		},
+		{
+			name: "variable",
+			dict: map[string]interface{}{
+				"foo": "${bar}",
+			},
+			expected: map[string]string{
+				"bar": "",
+			},
+		},
+		{
+			name: "required-variable",
+			dict: map[string]interface{}{
+				"foo": "${bar?:foo}",
+			},
+			expected: map[string]string{
+				"bar": "",
+			},
+		},
+		{
+			name: "required-variable2",
+			dict: map[string]interface{}{
+				"foo": "${bar?foo}",
+			},
+			expected: map[string]string{
+				"bar": "",
+			},
+		},
+		{
+			name: "default-variable",
+			dict: map[string]interface{}{
+				"foo": "${bar:-foo}",
+			},
+			expected: map[string]string{
+				"bar": "foo",
+			},
+		},
+		{
+			name: "default-variable2",
+			dict: map[string]interface{}{
+				"foo": "${bar-foo}",
+			},
+			expected: map[string]string{
+				"bar": "foo",
+			},
+		},
+		{
+			name: "multiple-values",
+			dict: map[string]interface{}{
+				"foo": "${bar:-foo}",
+				"bar": map[string]interface{}{
+					"foo": "${fruit:-banana}",
+					"bar": "vegetable",
+				},
+				"baz": []interface{}{
+					"foo",
+					"$docker:${project:-cli}",
+					"$toto",
+				},
+			},
+			expected: map[string]string{
+				"bar":     "foo",
+				"fruit":   "banana",
+				"toto":    "",
+				"docker":  "",
+				"project": "cli",
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := ExtractVariables(tc.dict, defaultPattern)
+			assert.Check(t, is.DeepEqual(actual, tc.expected))
+		})
+	}
 }

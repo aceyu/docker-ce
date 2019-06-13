@@ -1085,7 +1085,7 @@ per second from `/dev/sda`:
 
     $ docker run -it --device-read-bps /dev/sda:1mb ubuntu
 
-The `--device-write-bps` flag limits the write rate (bytes per second)to a device.
+The `--device-write-bps` flag limits the write rate (bytes per second) to a device.
 For example, this command creates a container and limits the write rate to `1mb`
 per second for `/dev/sda`:
 
@@ -1352,7 +1352,7 @@ The following `run` command options work with container networking:
     --expose=[]: Expose a port or a range of ports inside the container.
                  These are additional to those exposed by the `EXPOSE` instruction
     -P         : Publish all exposed ports to the host interfaces
-    -p=[]      : Publish a container᾿s port or a range of ports to the host
+    -p=[]      : Publish a container's port or a range of ports to the host
                    format: ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort | containerPort
                    Both hostPort and containerPort can be specified as a
                    range of ports. When specifying ranges for both, the
@@ -1555,7 +1555,7 @@ The example below mounts an empty tmpfs into the container with the `rw`,
     If neither 'rw' or 'ro' is specified then the volume is mounted in
     read-write mode.
 
-    The `nocopy` modes is used to disable automatic copying requested volume
+    The `nocopy` mode is used to disable automatically copying the requested volume
     path in the container to the volume storage location.
     For named volumes, `copy` is the default mode. Copy modes are not supported
     for bind-mounted volumes.
